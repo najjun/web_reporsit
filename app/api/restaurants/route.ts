@@ -8,6 +8,19 @@ export const maxDuration = 60;
 type Restaurant = { name: string; category?: string; rating?: string; reviews?: string; address?: string; distance?: string; href?: string; };
 function clean(s?: string | null) { return (s || '').replace(/\s+/g, ' ').trim(); }
 
+async function waitForPlaceLinks(page: any) {
+  await page.waitForFunction(() => {
+    const links = Array.from(document.querySelectorAll('a')) as HTMLAnchorElement[];
+    return links.some((a) => {
+      const href = a.href || '';
+      return /(?:m\.)?place\.naver\.com\/(?:restaurant|place)\//i.test(href) ||
+        /map\.naver\.com\/p\/entry\/place\//i.test(href) ||
+        /\/restaurant\/\d+/i.test(href) ||
+        /\/place\/\d+/i.test(href);
+    });
+  }, { timeout: 2200 }).catch(() => {});
+}
+
 export async function POST(req: NextRequest) {
   let browser;
   try {
@@ -34,16 +47,8 @@ export async function POST(req: NextRequest) {
 
     const page = await context.newPage();
     const searchUrl = `https://m.map.naver.com/search2/search.naver?query=${encodeURIComponent('맛집')}&sm=hty&style=v5&center=${longitude},${latitude}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(4500);
-
-    if (!page.url().includes('map.naver')) {
-      await page.goto(`https://map.naver.com/p/search/${encodeURIComponent('맛집')}?c=${longitude},${latitude},15,0,0,0,dh`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 25000,
-      });
-      await page.waitForTimeout(4500);
-    }
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await waitForPlaceLinks(page);
 
     const raw = await page.locator('a').evaluateAll((anchors) => {
       const isPlaceHref = (href: string) =>
