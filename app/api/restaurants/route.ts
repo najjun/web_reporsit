@@ -6,7 +6,9 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 type Restaurant = { name: string; category?: string; rating?: string; reviews?: string; address?: string; distance?: string; href?: string; };
+type Candidate = Restaurant & { visitorCount: number; blogCount: number; score: number; sourceIndex: number; };
 function clean(s?: string | null) { return (s || '').replace(/\s+/g, ' ').trim(); }
+function n(s?: string) { return s ? Number(s.replace(/,/g, '')) || 0 : 0; }
 
 async function waitForPlaceLinks(page: any) {
   await page.waitForFunction(() => {
@@ -17,6 +19,22 @@ async function waitForPlaceLinks(page: any) {
 
 function placeIdFromHref(href: string) {
   return href.match(/(?:restaurant|place)\/(\d+)/i)?.[1] || href.match(/entry\/place\/(\d+)/i)?.[1] || href;
+}
+
+function rankScore(sourceIndex: number, rating: number, visitor: number, blog: number) {
+  let score = 100 - sourceIndex * 1.5;
+  if (rating > 0) score += rating * 3;
+  if (visitor > 0) score += Math.min(35, Math.log10(visitor + 1) * 12);
+
+  // 블로그 리뷰가 실제 방문자 리뷰보다 비정상적으로 많은 경우 광고성 가능성 감점
+  if (blog > 0 && visitor === 0) score -= Math.min(35, 10 + Math.log10(blog + 1) * 8);
+  if (visitor > 0) {
+    const ratio = blog / visitor;
+    if (blog >= 30 && ratio >= 2) score -= 12;
+    if (blog >= 50 && ratio >= 4) score -= 20;
+    if (blog >= 100 && ratio >= 8) score -= 28;
+  }
+  return score;
 }
 
 export async function POST(req: NextRequest) {
@@ -55,9 +73,10 @@ export async function POST(req: NextRequest) {
 
     const seenPlaceIds = new Set<string>();
     const seenNames = new Set<string>();
-    const items: Restaurant[] = [];
+    const candidates: Candidate[] = [];
 
-    for (const x of raw) {
+    for (let i = 0; i < raw.length; i++) {
+      const x = raw[i];
       const placeId = placeIdFromHref(x.href);
       if (seenPlaceIds.has(placeId)) continue;
 
@@ -66,17 +85,34 @@ export async function POST(req: NextRequest) {
       const name = clean(t.split(/별점|방문자 리뷰|블로그 리뷰|영업|메뉴|거리|현재 영업|리뷰|가격/)[0]).slice(0, 60);
       if (!name || blockedNames.has(name) || seenNames.has(name)) continue;
 
+      const ratingText = t.match(/(?:별점\s*)?([0-5]\.[0-9])/i)?.[1];
+      const visitorText = t.match(/방문자 리뷰\s*([0-9,]+)/)?.[1];
+      const blogText = t.match(/블로그 리뷰\s*([0-9,]+)/)?.[1];
+      const distance = t.match(/([0-9.]+\s*(?:m|km))/i)?.[1];
+      const ratingNum = ratingText ? Number(ratingText) : 0;
+      const visitorCount = n(visitorText);
+      const blogCount = n(blogText);
+
       seenPlaceIds.add(placeId);
       seenNames.add(name);
-
-      const rating = t.match(/(?:별점\s*)?([0-5]\.[0-9])/i)?.[1];
-      const visitor = t.match(/방문자 리뷰\s*([0-9,]+)/)?.[1];
-      const blog = t.match(/블로그 리뷰\s*([0-9,]+)/)?.[1];
-      const distance = t.match(/([0-9.]+\s*(?:m|km))/i)?.[1];
-
-      items.push({ name, rating, reviews: visitor ? `방문자 리뷰 ${visitor}` : blog ? `블로그 리뷰 ${blog}` : undefined, distance, href: x.href });
-      if (items.length >= 10) break;
+      candidates.push({
+        name,
+        rating: ratingText,
+        reviews: visitorText ? `방문자 리뷰 ${visitorText}` : blogText ? `블로그 리뷰 ${blogText}` : undefined,
+        distance,
+        href: x.href,
+        visitorCount,
+        blogCount,
+        sourceIndex: i,
+        score: rankScore(i, ratingNum, visitorCount, blogCount),
+      });
+      if (candidates.length >= 30) break;
     }
+
+    const items: Restaurant[] = candidates
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10)
+      .map(({ visitorCount, blogCount, score, sourceIndex, ...item }) => item);
 
     if (!items.length) return NextResponse.json({ error: '네이버 지도에서 식당 상세 링크를 찾지 못했습니다.' }, { status: 502 });
     return NextResponse.json({ latitude, longitude, items });
